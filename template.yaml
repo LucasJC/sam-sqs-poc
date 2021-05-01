@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sam-sqs consumer and producer proof of concept
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: "VPC ID"
+  LambdaSubnets:
+    Description: "Lambda subnets"
+    Type: List<AWS::EC2::Subnet::Id>
+  DBSecurityGroup:
+    Type: String
+    Description: "Database security group"
+  DBHost:
+    Type: String
+    Description: "Database host"
+  DBPort:
+    Type: String
+    Description: "Database port"
+  DBName:
+    Type: String
+    NoEcho: true
+    Description: "Database name"
+  DBUsername:
+    Type: String
+    NoEcho: true
+    Description: "Username for database access"
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: "Password for database access"
+
+Resources:
+  LambdaVPCSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: sqs-consumer-lambda-vpc
+      GroupDescription: Security group for SQS consumer lambda function running inside the VPC
+      SecurityGroupEgress: 
+        - IpProtocol: tcp
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
+          FromPort: !Ref DBPort
+          ToPort: !Ref DBPort
+      VpcId: !Ref VpcId
+  SQSProducerFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Description: Lambda function that performs an HTTP request and sends the result to a SQS Queue
+      CodeUri: build
+      Handler: producer.handler
+      Runtime: nodejs14.x
+      Events:
+        ProductionRequest:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /producer
+            Method: post
+      Environment:
+        Variables:
+          QUEUE_NAME: !GetAtt POCQueue.QueueName
+          QUEUE_ARN: !GetAtt POCQueue.Arn
+      MemorySize: 128
+      Timeout: 25
+      Policies:
+        - AmazonSQSFullAccess 
+  # This is an SQS queue with all default configuration properties. To learn more about the available options, see
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-sqs-queues.html
+  POCQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: poc-queue
+  
+  # This is the Lambda function definition associated with the source code: sqs-payload-logger.js. For all available properties, see
+  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+  SQSConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Lambda function that consumes SQS messages and persists them in a database
+      Runtime: nodejs14.x
+      CodeUri: build
+      Handler: consumer.handler
+      # This property associates this Lambda function with the SQS queue defined above, so that whenever the queue
+      # receives a message, the Lambda function is invoked
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt POCQueue.Arn
+      Environment:
+        Variables:
+          DB_HOST: !Ref DBHost
+          DB_NAME: !Ref DBName
+          DB_PORT: !Ref DBPort
+          DB_USERNAME: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+      ReservedConcurrentExecutions: 2 # limit concurrent executions to not stress db connections
+      MemorySize: 128
+      Timeout: 25 # Chosen to be less than the default SQS Visibility Timeout of 30 seconds
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - VPCAccessPolicy: {}
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaVPCSecurityGroup
+        SubnetIds: !Ref LambdaSubnets
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  ProducerAPI:
+    Description: "API Gateway endpoint URL for Prod stage for Hello World function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+  SQSProducerFunction:
+    Description: "SQS Producer Lambda Function ARN"
+    Value: !GetAtt SQSProducerFunction.Arn
+  SQSProducerFunctionIamRole:
+    Description: "Implicit IAM Role created for SQS Producer function"
+    Value: !GetAtt SQSProducerFunctionRole.Arn
